@@ -40,7 +40,7 @@ class Config:
 
     def __init__(self, cals: tuple[NDArray, ...], num_ref_lines: int, num_noref_lines: int,
                  cal_have_ref: list[int] | None = None, num_mc_iters: int = 100, num_pixels: int = 2048, pixel_uncs: tuple[float, float] = (0.05, 0.5),
-                 wl_uncs: tuple[float, float] = (0.0001, 0.001), rng_seed: int = 123):
+                 wl_uncs: tuple[float, float] = (0.0001, 0.001), rng_seed: int = 124):
 
         self.cals = cals
         self.cal_npoly = tuple([len(cal) for cal in cals])
@@ -99,7 +99,7 @@ def generate_observations(cfg: Config) -> tuple[list[Observation], dict[str, flo
         label = f'ref_line{i}' if i < cfg.num_ref_lines else f'noref_line{i-cfg.num_ref_lines}'
         true_wls[label] = true_wl
         lines.append((true_wl,
-                      Line(wavelength=None if 'noref' in label else ufloat(true_wl + cfg.rng.normal(0, wl_unc), wl_unc) , notes=label)))
+                      Line(wavelength=None if 'noref' in label else ufloat(true_wl + cfg.rng.normal(0, wl_unc), wl_unc), notes=label)))
 
     for i, cal in enumerate(cfg.cals):
         min_wl, max_wl = poly(0, *cal), poly(cfg.num_pixels-1, *cal)
@@ -181,8 +181,7 @@ def hunter_fitter(obs: list[Observation], cal_npoly: tuple[int, ...]) -> FitResu
             match_obs = [ob for ob in obs if ob.line.notes == lname]
             y_pred: list[UFloat] = [poly(ob.ind_vars['x'], *coeffs_lists[int(ob.ind_vars['cidx'])]) for ob in match_obs]
 
-            if (
-            ref_wl := match_obs[0].line.wavelength) is not None:  # If there is a reference wavelength include it now
+            if (ref_wl := match_obs[0].line.wavelength) is not None:  # If there is a reference wavelength include it now
                 y_pred.append(ref_wl)
 
             y_predmu = nominal_values(y_pred)
@@ -258,20 +257,19 @@ def sasha_fitter1(obs: list[Observation], cal_npoly: tuple[int, ...]) -> FitResu
 
     minres = lmfit.minimize(target, params, scale_covar=False)
     params = minres.params
-    coefficient_lists = [[params[f'c{cidx}_{power}'].value for power in range(num)] for cidx, num in enumerate(cal_npoly)]
+    coefficient_lists = [[minres.uvars[f'c{cidx}_{power}'] for power in range(num)] for cidx, num in enumerate(cal_npoly)]
     for line_name in line_names:
         match_observ = [ob for ob in obs if ob.line.notes == line_name]
         y_pred_final = [poly(ob.ind_vars['x'], *coefficient_lists[int(ob.ind_vars['cidx'])]) for ob in match_observ]
 
-        y_wm_uvar = (np.array(y_pred_final) / std_devs(y_pred_final) ** 2).sum() / (1 / std_devs(y_pred_final) ** 2).sum()
-        opt_values[line_name] = y_wm_uvar
-        params[f'wl{line_name}'].value = y_wm_uvar
+        y_wm_uvar_final = (np.array(y_pred_final) / std_devs(y_pred_final) ** 2).sum() / (1 / std_devs(y_pred_final) ** 2).sum()
+        opt_values[line_name] = y_wm_uvar_final
+        params[f'wl{line_name}'].value = y_wm_uvar_final
 
     return FitResult(obs, opt_values, minres)
 
 
-def summarize_stats(fitreses: list[FitResult], axes: list[plt.Axes] | None = None,
-                    folder: str | None = None, fitter_name: str | None = None, **plotkwargs):
+def save_stats(fitreses: list[FitResult], fitter_name: str, folder: str):
 
     def flatten(dictionary, parent_key='', separator='_'):
         items = []
@@ -288,17 +286,21 @@ def summarize_stats(fitreses: list[FitResult], axes: list[plt.Axes] | None = Non
         stats = [flatten(fitres.stats) for fitres in fitreses]
         pd.DataFrame.from_records(stats).to_csv(outfile, index=False)
 
-    stat_keys = [key for key in fitreses[0].stats if not isinstance(fitreses[0].stats[key], dict)]
-    for i, stat_name in enumerate(stat_keys):
-        stat_vals = [fitres.stats[stat_name] for fitres in fitreses]
-        stat_vals = np.clip(stat_vals, -2e-3, 2e-3)
+
+def summarize_stats(folder: str, fitter_name: str | None = None, axes: list[plt.Axes] | None = None, **plotkwargs):
+
+    stats = pd.read_csv(folder + f'/{fitter_name}.csv', header=0).to_dict(orient='series')
+    # noinspection PyTypeChecker
+    stats = [(k, stats[k].to_numpy()) for k in sorted(list(stats.keys()))]
+    for i, (stat_name, stat_vals) in enumerate(stats):
+        stat_vals = stat_vals[(stat_vals > np.percentile(stat_vals, 2.5)) & (stat_vals < np.percentile(stat_vals, 97.5))]
 
         if axes is None:
             plt.subplots(figsize=(10, 6))
         else:
             plt.sca(axes[i])
 
-        plt.hist(stat_vals, bins=20, label=fitter_name, **plotkwargs)
+        plt.hist(stat_vals, bins=50, label=fitter_name, **plotkwargs)
         plt.title(f'Distribution of {stat_name}')
         plt.xlabel(f'{stat_name}')
         plt.ylabel('count')
@@ -312,7 +314,7 @@ if __name__ == '__main__':
     warnings.simplefilter(action='ignore', category=FutureWarning)
 
     calibrations = np.array([3.0, 2e-3, 1.5e-6]), np.array([2, 2.5e-3, 1.3e-6]), np.array([2.3, 2.2e-3, 1e-6])
-    config = Config(calibrations, 20, 25, num_mc_iters=50, cal_have_ref=[0])
+    config = Config(calibrations, 20, 25, num_mc_iters=500, cal_have_ref=[0])
 
     fitters: dict[str, Callable[[list[Observation], tuple[int, ...]], FitResult]] = {
         'hunter_fitter': hunter_fitter,
@@ -325,9 +327,10 @@ if __name__ == '__main__':
         while niters < config.num_mc_iters:
             data, true_wavelengths = generate_observations(config)
             for fittername, fitter in fitters.items():
-                fitresult = fitter(data, config.cal_npoly)
-                if getattr(fitresult.minres, 'uvars', None) is None:  # fit failed ...
-                    print(f'Fit failed on iter {niters} using fitter {fittername}.')
+                try:
+                    fitresult = fitter(data, config.cal_npoly)
+                except AttributeError as E:
+                    print(f'Fit failed (no uncertainties) on iter {niters} with fitter {fittername}')
                     break
                 fitresult.add_true_vals(true_wavelengths, config)
                 fitresult.generate_statistics()  # calc rmse, mse, msd
@@ -336,12 +339,15 @@ if __name__ == '__main__':
                 niters += 1
                 bar()
 
-    axs = [plt.subplots()[1] for _ in range(9)]
+    axs = [plt.subplots()[1] for _ in range(9 + 3 * len(config.cals))]  # TODO: Make this decoupled, maybe class for stats?
 
     dtstr = datetime.datetime.now().strftime("%H%M%S_%m%d%Y")
     run_folder = f'results/{len(config.cals)}cals_{config.num_ref_lines}ref_{config.num_noref_lines}noref_{config.num_mc_iters}iters_{dtstr}'
     config.save(folder=run_folder)
-    summarize_stats(fitresults['hunter_fitter'], fitter_name='hunter_fitter', axes=axs, folder=run_folder, color='b', alpha=0.5)
-    summarize_stats(fitresults['sasha_fitter1'], fitter_name='sasha_fitter', axes=axs, folder=run_folder, color='r', alpha=0.5)
+    save_stats(fitresults['hunter_fitter'], fitter_name='hunter_fitter', folder=run_folder)
+    save_stats(fitresults['sasha_fitter1'], fitter_name='sasha_fitter1', folder=run_folder)
+
+    summarize_stats(folder=run_folder, fitter_name='hunter_fitter', axes=axs, color='b', alpha=0.5)
+    summarize_stats(folder=run_folder, fitter_name='sasha_fitter1', axes=axs, color='r', alpha=0.5)
 
     plt.show()
