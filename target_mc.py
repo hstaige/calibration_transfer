@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 import pandas as pd
 import lmfit
-from uncertainties import ufloat, UFloat
+from uncertainties import ufloat, UFloat, correlation_matrix
 from uncertainties.unumpy import nominal_values, std_devs
 from alive_progress import alive_bar
 
@@ -260,9 +260,13 @@ def sasha_fitter1(obs: list[Observation], cal_npoly: tuple[int, ...]) -> FitResu
     coefficient_lists = [[minres.uvars[f'c{cidx}_{power}'] for power in range(num)] for cidx, num in enumerate(cal_npoly)]
     for line_name in line_names:
         match_observ = [ob for ob in obs if ob.line.notes == line_name]
-        y_pred_final = [poly(ob.ind_vars['x'], *coefficient_lists[int(ob.ind_vars['cidx'])]) for ob in match_observ]
+        y_pred_final = [poly(ob.ind_vars['x'], *coefficient_lists[int(ob.ind_vars['cidx'])]) for ob in match_observ]  # contains uncertainty from x and coefficients
 
-        y_wm_uvar_final = (np.array(y_pred_final) / std_devs(y_pred_final) ** 2).sum() / (1 / std_devs(y_pred_final) ** 2).sum()
+        # Generalized weighted average, considers correlations
+        y_pred_cov = correlation_matrix(y_pred_final)
+        y_pred_cov_inv = ((1 / np.tile(std_devs(y_pred_final), (len(y_pred_final), 1)).T) * np.linalg.inv(y_pred_cov) *
+                          (1 / np.tile(std_devs(y_pred_final), (len(y_pred_final), 1))))
+        y_wm_uvar_final = np.ones(len(y_pred_final))[None, :] @ y_pred_cov_inv @ y_pred_final / np.sum(y_pred_cov_inv)
         opt_values[line_name] = y_wm_uvar_final
         params[f'wl{line_name}'].value = y_wm_uvar_final
 
